@@ -1,11 +1,13 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 
 from src.app.api import health
 from src.app.api.agents import architect, implement, reviewer, tester
 from src.app.api import orchestration, dashboard, websocket
+from src.app.core.database import init_db
 
 
 def create_app() -> FastAPI:
@@ -14,6 +16,15 @@ def create_app() -> FastAPI:
         title="Agent Teams Starter",
         description="A starter template for agent teams applications with 4 specialized agents",
         version="0.1.0",
+    )
+
+    # Configure CORS
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173", "http://127.0.0.1:3000"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     # Include routers
@@ -33,6 +44,16 @@ def create_app() -> FastAPI:
 
     # WebSocket endpoint
     app.include_router(websocket.router, tags=["websocket"])
+
+    # Initialize database on startup
+    @app.on_event("startup")
+    async def startup_event():
+        try:
+            await init_db()
+            print("Database initialized successfully")
+        except Exception as e:
+            print(f"Failed to initialize database: {e}")
+            raise
 
     # Mount static files (frontend)
     frontend_path = Path(__file__).parent.parent.parent.parent / "frontend" / "dist"

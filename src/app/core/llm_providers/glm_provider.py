@@ -24,6 +24,7 @@ class GLMConfig(BaseSettings):
     class Config:
         env_prefix = ""
         env_file = ".env"
+        extra = "ignore"
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -87,6 +88,8 @@ class GLMProvider(BaseLLMProvider):
         self, prompt: str, schema: type[T], **kwargs: Any
     ) -> T:
         """Generate a structured response using the given Pydantic schema."""
+        import json
+
         model = self._get_model_instance()
 
         # Update model config from kwargs if provided
@@ -95,14 +98,53 @@ class GLMProvider(BaseLLMProvider):
         if "max_tokens" in kwargs:
             model.max_tokens = kwargs["max_tokens"]
 
-        # Use with_structured_output for structured generation
-        structured_model = model.with_structured_output(schema)
-        result = await structured_model.ainvoke(prompt)
+        # GLM may not support with_structured_output properly
+        # Use explicit JSON instruction instead
+        json_schema = schema.model_json_schema()
+        json_instruction = f"""
 
-        if isinstance(result, BaseModel):
-            return result
-        # Some providers may return dict, convert to schema
-        return schema(**result)
+You must respond with a valid JSON object that follows this exact schema:
+{json.dumps(json_schema, indent=2)}
+
+Your response must be ONLY the JSON object, no additional text or explanation.
+Ensure all required fields are present and values match the specified types."""
+
+        enhanced_prompt = prompt + json_instruction
+
+        # Try using with_structured_output first
+        try:
+            structured_model = model.with_structured_output(schema)
+            result = await structured_model.ainvoke(enhanced_prompt)
+
+            if isinstance(result, BaseModel):
+                return result
+            # Some providers may return dict, convert to schema
+            return schema(**result)
+        except Exception as e:
+            # Fallback: parse JSON from text response
+            try:
+                response: AIMessage = await model.ainvoke(enhanced_prompt)
+                content = response.content
+
+                # Try to extract JSON from the response
+                if isinstance(content, str):
+                    # Look for JSON object in the response
+                    start_idx = content.find("{")
+                    end_idx = content.rfind("}") + 1
+
+                    if start_idx >= 0 and end_idx > start_idx:
+                        json_str = content[start_idx:end_idx]
+                        data = json.loads(json_str)
+                        return schema(**data)
+
+                # If no JSON found, try parsing the whole response
+                data = json.loads(content)
+                return schema(**data)
+            except Exception as parse_error:
+                raise RuntimeError(
+                    f"Failed to parse structured output from GLM: {parse_error}\n"
+                    f"Response was: {content if 'content' in locals() else 'N/A'}"
+                ) from parse_error
 
     def supports_streaming(self) -> bool:
         """Check if the provider supports streaming responses."""

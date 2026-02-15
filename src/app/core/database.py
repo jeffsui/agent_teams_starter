@@ -2,11 +2,13 @@
 import aiosqlite
 from pathlib import Path
 from typing import AsyncIterator
+from contextlib import asynccontextmanager
 
 # Database file path
 DB_PATH = Path(__file__).parent.parent.parent.parent / "data" / "agent_teams.db"
 
 
+@asynccontextmanager
 async def get_db() -> AsyncIterator[aiosqlite.Connection]:
     """Get database connection.
 
@@ -22,6 +24,9 @@ async def get_db() -> AsyncIterator[aiosqlite.Connection]:
 
 async def init_db() -> None:
     """Initialize database schema."""
+    # Ensure data directory exists
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
     async with aiosqlite.connect(DB_PATH) as db:
         # Enable foreign keys
         await db.execute("PRAGMA foreign_keys = ON")

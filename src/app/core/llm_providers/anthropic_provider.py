@@ -23,6 +23,7 @@ class AnthropicConfig(BaseSettings):
     class Config:
         env_prefix = ""
         env_file = ".env"
+        extra = "ignore"
 
 
 T = TypeVar("T", bound=BaseModel)
