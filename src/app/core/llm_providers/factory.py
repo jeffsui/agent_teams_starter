@@ -5,13 +5,14 @@ from pydantic_settings import BaseSettings
 
 from .anthropic_provider import AnthropicConfig, AnthropicProvider
 from .base import BaseLLMProvider
+from .glm_provider import GLMConfig, GLMProvider
 from .openai_provider import OpenAIConfig, OpenAIProvider
 
 
 class ProviderConfig(BaseSettings):
     """Configuration for provider selection."""
 
-    default_provider: str = "anthropic"
+    default_provider: str = "glm"
     anthropic_api_key: str | None = None
     anthropic_model: str = "claude-3-5-sonnet-20241022"
     anthropic_temperature: float = 0.7
@@ -23,6 +24,12 @@ class ProviderConfig(BaseSettings):
     openai_max_tokens: int = 4096
     openai_timeout: float = 60.0
     openai_base_url: str | None = None
+    glm_api_key: str | None = None
+    glm_model: str = "glm-4.7"
+    glm_temperature: float = 0.7
+    glm_max_tokens: int = 4096
+    glm_timeout: float = 60.0
+    glm_base_url: str | None = None
 
     class Config:
         env_prefix = ""
@@ -35,6 +42,8 @@ class ProviderFactory:
     _providers: dict[str, type[BaseLLMProvider]] = {
         "anthropic": AnthropicProvider,
         "openai": OpenAIProvider,
+        "glm": GLMProvider,
+        "zhipu": GLMProvider,  # Alias for GLM
     }
 
     @classmethod
@@ -93,6 +102,15 @@ class ProviderFactory:
                 openai_max_tokens=config.openai_max_tokens,
                 openai_timeout=config.openai_timeout,
                 openai_base_url=config.openai_base_url,
+            )
+        elif name in ("glm", "zhipu"):
+            provider_config = GLMConfig(
+                glm_api_key=config.glm_api_key,
+                glm_model=config.glm_model,
+                glm_temperature=config.glm_temperature,
+                glm_max_tokens=config.glm_max_tokens,
+                glm_timeout=config.glm_timeout,
+                glm_base_url=config.glm_base_url,
             )
         else:
             # For custom registered providers, use generic config

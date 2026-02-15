@@ -24,6 +24,14 @@ from .orchestration import (
     WorkflowStatusResponse,
     WorkflowResultsResponse,
 )
+from .database import (
+    WorkflowRecordDB,
+    ConversationHistoryRecord,
+    WorkflowListItem,
+    ConversationMessage,
+    WorkflowDetail,
+    DashboardStats,
+)
 
 __all__ = [
     "ArchitectRequest",
@@ -44,4 +52,10 @@ __all__ = [
     "WorkflowStartResponse",
     "WorkflowStatusResponse",
     "WorkflowResultsResponse",
+    "WorkflowRecordDB",
+    "ConversationHistoryRecord",
+    "WorkflowListItem",
+    "ConversationMessage",
+    "WorkflowDetail",
+    "DashboardStats",
 ]

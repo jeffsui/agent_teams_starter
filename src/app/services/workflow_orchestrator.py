@@ -13,12 +13,14 @@ from src.app.core.agents import (
     TesterAgent,
 )
 from src.app.core.llm_providers import ProviderFactory, ProviderConfig
+from src.app.core.websocket_manager import get_websocket_manager
 from src.app.models.orchestration import (
     WorkflowState,
     WorkflowStatus,
     AgentStepStatus,
     AgentStepResult,
 )
+from src.app.repositories import get_workflow_repository
 
 
 class WorkflowOrchestrator:
@@ -28,6 +30,8 @@ class WorkflowOrchestrator:
         """Initialize the workflow orchestrator."""
         self._workflows: dict[str, WorkflowState] = {}
         self._lock = asyncio.Lock()
+        self._repo = get_workflow_repository()
+        self._ws_manager = get_websocket_manager()
 
     async def start_workflow(
         self,
@@ -56,6 +60,15 @@ class WorkflowOrchestrator:
             workflow_id=workflow_id,
             status=WorkflowStatus.PENDING,
             created_at=now,
+            requirements=requirements,
+            context=context,
+            provider=provider,
+        )
+
+        # Create workflow in database
+        await self._repo.create_workflow(
+            workflow_id=workflow_id,
+            status=WorkflowStatus.PENDING,
             requirements=requirements,
             context=context,
             provider=provider,
@@ -99,6 +112,26 @@ class WorkflowOrchestrator:
             workflow.status = WorkflowStatus.RUNNING
             workflow.started_at = datetime.utcnow()
 
+        # Update database and broadcast
+        await self._repo.update_workflow_status(
+            workflow_id=workflow_id,
+            status=WorkflowStatus.RUNNING,
+            started_at=datetime.utcnow().isoformat(),
+        )
+        await self._ws_manager.broadcast_workflow_update(
+            workflow_id=workflow_id,
+            status=WorkflowStatus.RUNNING,
+            current_step=None,
+        )
+
+        # Save initial conversation
+        await self._repo.save_conversation(
+            workflow_id=workflow_id,
+            agent_name="system",
+            role="user",
+            content=requirements,
+        )
+
         # Create provider
         config = ProviderConfig()
         if provider:
@@ -129,6 +162,10 @@ class WorkflowOrchestrator:
                 "architect",
                 architect_output.model_dump(),
             )
+            # Save conversation
+            await self._save_agent_conversation(
+                workflow_id, "architect", requirements, architect_output.model_dump()
+            )
         except Exception as e:
             await self._fail_step(workflow_id, "architect", str(e))
             await self._fail_workflow(workflow_id, str(e))
@@ -150,6 +187,10 @@ class WorkflowOrchestrator:
                 workflow_id,
                 "implement",
                 implement_output.model_dump(),
+            )
+            # Save conversation
+            await self._save_agent_conversation(
+                workflow_id, "implement", str(architect_output.model_dump()), implement_output.model_dump()
             )
         except Exception as e:
             await self._fail_step(workflow_id, "implement", str(e))
@@ -173,6 +214,10 @@ class WorkflowOrchestrator:
                 "reviewer",
                 reviewer_output.model_dump(),
             )
+            # Save conversation
+            await self._save_agent_conversation(
+                workflow_id, "reviewer", str(implement_output.model_dump()), reviewer_output.model_dump()
+            )
         except Exception as e:
             await self._fail_step(workflow_id, "reviewer", str(e))
             # Don't fail the entire workflow for review errors, continue to testing
@@ -195,6 +240,10 @@ class WorkflowOrchestrator:
                 "tester",
                 {},
             )
+            # Save conversation
+            await self._save_agent_conversation(
+                workflow_id, "tester", str(implement_output.model_dump()), {}
+            )
         except Exception as e:
             await self._fail_step(workflow_id, "tester", str(e))
             # Don't fail the entire workflow for tester errors
@@ -205,6 +254,18 @@ class WorkflowOrchestrator:
             if workflow and workflow.status != WorkflowStatus.FAILED:
                 workflow.status = WorkflowStatus.COMPLETED
                 workflow.completed_at = datetime.utcnow()
+
+        # Update database and broadcast
+        await self._repo.update_workflow_status(
+            workflow_id=workflow_id,
+            status=WorkflowStatus.COMPLETED,
+            completed_at=datetime.utcnow().isoformat(),
+        )
+        await self._ws_manager.broadcast_workflow_update(
+            workflow_id=workflow_id,
+            status=WorkflowStatus.COMPLETED,
+            current_step=None,
+        )
 
     async def _update_step_status(
         self, workflow_id: str, agent_name: str, status: AgentStepStatus
@@ -230,10 +291,25 @@ class WorkflowOrchestrator:
             elif agent_name == "tester":
                 workflow.tester_result = step_result
 
+        # Update database and broadcast
+        await self._repo.update_agent_step(
+            workflow_id=workflow_id,
+            agent_name=agent_name,
+            status=status,
+            started_at=datetime.utcnow().isoformat() if status == AgentStepStatus.IN_PROGRESS else None,
+        )
+        await self._ws_manager.broadcast_workflow_update(
+            workflow_id=workflow_id,
+            status=WorkflowStatus.RUNNING,
+            current_step=agent_name,
+        )
+
     async def _complete_step(
         self, workflow_id: str, agent_name: str, result: dict[str, Any]
     ) -> None:
         """Mark an agent step as completed with results."""
+        now = datetime.utcnow()
+
         async with self._lock:
             workflow = self._workflows.get(workflow_id)
             if not workflow:
@@ -242,8 +318,8 @@ class WorkflowOrchestrator:
             step_result = AgentStepResult(
                 agent_name=agent_name,
                 status=AgentStepStatus.COMPLETED,
-                started_at=datetime.utcnow(),
-                completed_at=datetime.utcnow(),
+                started_at=now,
+                completed_at=now,
                 result=result,
             )
 
@@ -256,10 +332,27 @@ class WorkflowOrchestrator:
             elif agent_name == "tester":
                 workflow.tester_result = step_result
 
+        # Update database and broadcast
+        await self._repo.update_agent_step(
+            workflow_id=workflow_id,
+            agent_name=agent_name,
+            status=AgentStepStatus.COMPLETED,
+            started_at=now.isoformat(),
+            completed_at=now.isoformat(),
+            result=result,
+        )
+        await self._ws_manager.broadcast_workflow_update(
+            workflow_id=workflow_id,
+            status=WorkflowStatus.RUNNING,
+            current_step=agent_name,
+        )
+
     async def _fail_step(
         self, workflow_id: str, agent_name: str, error: str
     ) -> None:
         """Mark an agent step as failed."""
+        now = datetime.utcnow()
+
         async with self._lock:
             workflow = self._workflows.get(workflow_id)
             if not workflow:
@@ -268,8 +361,8 @@ class WorkflowOrchestrator:
             step_result = AgentStepResult(
                 agent_name=agent_name,
                 status=AgentStepStatus.FAILED,
-                started_at=datetime.utcnow(),
-                completed_at=datetime.utcnow(),
+                started_at=now,
+                completed_at=now,
                 error=error,
             )
 
@@ -282,14 +375,71 @@ class WorkflowOrchestrator:
             elif agent_name == "tester":
                 workflow.tester_result = step_result
 
+        # Update database and broadcast
+        await self._repo.update_agent_step(
+            workflow_id=workflow_id,
+            agent_name=agent_name,
+            status=AgentStepStatus.FAILED,
+            started_at=now.isoformat(),
+            completed_at=now.isoformat(),
+            error=error,
+        )
+        await self._ws_manager.broadcast_workflow_update(
+            workflow_id=workflow_id,
+            status=WorkflowStatus.RUNNING,
+            current_step=agent_name,
+        )
+
     async def _fail_workflow(self, workflow_id: str, error: str) -> None:
         """Mark the workflow as failed."""
+        now = datetime.utcnow()
+
         async with self._lock:
             workflow = self._workflows.get(workflow_id)
             if workflow:
                 workflow.status = WorkflowStatus.FAILED
-                workflow.completed_at = datetime.utcnow()
+                workflow.completed_at = now
                 workflow.error = error
+
+        # Update database and broadcast
+        await self._repo.update_workflow_status(
+            workflow_id=workflow_id,
+            status=WorkflowStatus.FAILED,
+            completed_at=now.isoformat(),
+            error=error,
+        )
+        await self._ws_manager.broadcast_workflow_update(
+            workflow_id=workflow_id,
+            status=WorkflowStatus.FAILED,
+            current_step=None,
+        )
+
+    async def _save_agent_conversation(
+        self, workflow_id: str, agent_name: str, prompt: str, response: dict
+    ) -> None:
+        """Save agent conversation to database.
+
+        Args:
+            workflow_id: The workflow ID.
+            agent_name: The agent name.
+            prompt: The prompt sent to the agent.
+            response: The response from the agent.
+        """
+        # Save the prompt as user message
+        await self._repo.save_conversation(
+            workflow_id=workflow_id,
+            agent_name=agent_name,
+            role="user",
+            content=prompt,
+        )
+
+        # Save the response as assistant message
+        await self._repo.save_conversation(
+            workflow_id=workflow_id,
+            agent_name=agent_name,
+            role="assistant",
+            content=str(response),
+        )
 
     async def get_workflow_status(self, workflow_id: str) -> WorkflowState | None:
         """Get the status of a workflow.
